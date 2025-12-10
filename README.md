@@ -1,4 +1,6 @@
-# Velocity Auto Register
+<img width="4096" height="843" alt="Github Repository Header" src="https://github.com/user-attachments/assets/dda2f9bd-4ef3-4df2-875a-30a18272ae3a" />
+</br>
+</br>
 
 A Velocity plugin that automatically discovers and registers Minecraft servers with Velocity using the Docker socket API.
 
