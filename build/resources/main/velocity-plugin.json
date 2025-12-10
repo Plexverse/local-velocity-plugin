@@ -1,0 +1,9 @@
+{
+  "id": "velocity-auto-register",
+  "name": "Velocity Auto Register",
+  "version": "1.0.0",
+  "description": "Automatically registers Minecraft servers with Velocity based on Docker services",
+  "authors": ["Plexverse"],
+  "main": "net.plexverse.velocityautoregister.VelocityAutoRegister"
+}
+
