@@ -7,13 +7,12 @@ import com.github.dockerjava.core.DefaultDockerClientConfig;
 import com.github.dockerjava.core.DockerClientImpl;
 import com.github.dockerjava.httpclient5.ApacheDockerHttpClient;
 import com.velocitypowered.api.event.Subscribe;
-import com.velocitypowered.api.event.connection.LoginEvent;
-import com.velocitypowered.api.event.player.KickedFromServerEvent;
+import com.velocitypowered.api.event.PostOrder;
+import com.velocitypowered.api.event.player.PlayerChooseInitialServerEvent;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
 import com.velocitypowered.api.plugin.Plugin;
 import com.velocitypowered.api.plugin.annotation.DataDirectory;
-import com.velocitypowered.api.proxy.ConnectionRequestBuilder;
 import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.server.ServerInfo;
 import net.kyori.adventure.text.Component;
@@ -26,6 +25,7 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @Plugin(
     id = "velocity-auto-register",
@@ -42,7 +42,6 @@ public class VelocityAutoRegister {
     private DockerClient dockerClient;
     private final Set<String> registeredServers = new HashSet<>();
     private volatile String defaultServerName = null;
-    private final Map<java.util.UUID, String> pendingConnections = new HashMap<>();
     private static final Pattern COMPOSE_SCALE_PATTERN = Pattern.compile("^(.+)_(\\d+)$");
     
     @Inject
@@ -99,76 +98,16 @@ public class VelocityAutoRegister {
     }
     
     @Subscribe
-    public void onPlayerLogin(LoginEvent event) {
-        // Wait for player to fully join before connecting
-        server.getScheduler().buildTask(this, () -> {
-            String targetServer = getDefaultServerName();
-            if (targetServer != null) {
-                server.getServer(targetServer).ifPresent(target -> {
-                    // Track this connection attempt so we can handle kicks
-                    pendingConnections.put(event.getPlayer().getUniqueId(), targetServer);
-                    
-                    ConnectionRequestBuilder connectionRequest = event.getPlayer().createConnectionRequest(target);
-                    connectionRequest.connect().thenAccept(result -> {
-                        if (result.isSuccessful()) {
-                            logger.info("Successfully connected player {} to default server: {}", 
-                                event.getPlayer().getUsername(), targetServer);
-                            // Remove from pending after successful connection
-                            pendingConnections.remove(event.getPlayer().getUniqueId());
-                        } else {
-                            // Connection failed - try to get reason from result
-                            String reason = "Connection failed";
-                            if (result.getReasonComponent().isPresent()) {
-                                Component reasonComponent = result.getReasonComponent().get();
-                                reason = LegacyComponentSerializer.legacySection().serialize(reasonComponent);
-                            } else if (result.getStatus() != null) {
-                                reason = result.getStatus().name();
-                            }
-                            
-                            logger.warn("Failed to connect player {} to default server {}: {}", 
-                                event.getPlayer().getUsername(), targetServer, reason);
-                            
-                            // Remove from pending
-                            pendingConnections.remove(event.getPlayer().getUniqueId());
-                            
-                            // Forward the failure reason to the player
-                            event.getPlayer().disconnect(Component.text("Failed to connect to " + targetServer + ": " + reason));
-                        }
-                    }).exceptionally(throwable -> {
-                        logger.error("Error connecting player {} to default server {}: {}", 
-                            event.getPlayer().getUsername(), targetServer, throwable.getMessage(), throwable);
-                        pendingConnections.remove(event.getPlayer().getUniqueId());
-                        event.getPlayer().disconnect(Component.text("Failed to connect to " + targetServer + ": " + 
-                            (throwable.getMessage() != null ? throwable.getMessage() : "Connection error")));
-                        return null;
-                    });
-                    
-                    logger.info("Connecting player {} to default server: {}", event.getPlayer().getUsername(), targetServer);
-                });
-            } else {
-                logger.warn("No default server available for player {}", event.getPlayer().getUsername());
-                event.getPlayer().disconnect(Component.text("No servers available. Please try again later."));
-            }
-        }).schedule();
-    }
-    
-    @Subscribe
-    public void onKickedFromServer(KickedFromServerEvent event) {
-        // Check if this is a kick from a pending default server connection
-        String pendingServer = pendingConnections.get(event.getPlayer().getUniqueId());
-        if (pendingServer != null && event.getServer().getServerInfo().getName().equals(pendingServer)) {
-            // Get the server's kick reason
-            Component kickReason = event.getServerKickReason().orElse(Component.text("Disconnected from server"));
-            String reasonText = LegacyComponentSerializer.legacySection().serialize(kickReason);
-            
-            logger.warn("Player {} was kicked from default server {}: {}", 
-                event.getPlayer().getUsername(), pendingServer, reasonText);
-            
-            // Remove from pending
-            pendingConnections.remove(event.getPlayer().getUniqueId());
-            
-            // Forward the server's rejection reason to the player
-            event.setResult(KickedFromServerEvent.DisconnectPlayer.create(kickReason));
+    public void onPlayerChooseInitialServer(PlayerChooseInitialServerEvent event) {
+        // Set the initial server for the player when they first connect
+        String targetServer = getDefaultServerName();
+        if (targetServer != null) {
+            server.getServer(targetServer).ifPresent(target -> {
+                logger.info("Setting initial server for player {} to: {}", event.getPlayer().getUsername(), targetServer);
+                event.setInitialServer(target);
+            });
+        } else {
+            logger.warn("No default server available for player {}", event.getPlayer().getUsername());
         }
     }
     
@@ -184,15 +123,18 @@ public class VelocityAutoRegister {
     }
     
     private void updateDefaultServer() {
-        // Prefer server with 'lobby' in the name
-        Optional<String> lobbyServer = registeredServers.stream()
+        // Collect all servers with 'lobby' in the name
+        List<String> lobbyServers = registeredServers.stream()
             .filter(name -> name.toLowerCase().contains("lobby"))
             .filter(name -> server.getServer(name).isPresent())
-            .findFirst();
+            .collect(java.util.stream.Collectors.toList());
         
-        if (lobbyServer.isPresent()) {
-            defaultServerName = lobbyServer.get();
-            logger.info("Default server set to: {} (contains 'lobby')", defaultServerName);
+        if (!lobbyServers.isEmpty()) {
+            // Select a random lobby server
+            Random random = new Random();
+            defaultServerName = lobbyServers.get(random.nextInt(lobbyServers.size()));
+            logger.info("Default server set to: {} (random lobby server from {} available)", 
+                defaultServerName, lobbyServers.size());
             return;
         }
         
